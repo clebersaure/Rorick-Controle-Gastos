@@ -1,0 +1,76 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Usuario {
+  id        Int      @id @default(autoincrement())
+  nome      String
+  telefone  String   @unique
+  perfil    Perfil   @default(OPERADOR)
+  ativo     Boolean  @default(true)
+  gastos    Gasto[]
+  criadoEm DateTime @default(now())
+}
+
+model Gasto {
+  id             Int           @id @default(autoincrement())
+  valor          Decimal       @db.Decimal(10, 2)
+  data           DateTime
+  fornecedor     String?
+  descricao      String?
+  categoriaId    Int
+  categoria      Categoria     @relation(fields: [categoriaId], references: [id])
+  subcategoriaId Int?
+  subcategoria   Subcategoria? @relation(fields: [subcategoriaId], references: [id])
+  usuarioId      Int
+  usuario        Usuario       @relation(fields: [usuarioId], references: [id])
+  obraId         Int?
+  obra           Obra?         @relation(fields: [obraId], references: [id])
+  imagemUrl      String?
+  fonte          Fonte         @default(FOTO)
+  criadoEm      DateTime      @default(now())
+}
+
+model Categoria {
+  id            Int            @id @default(autoincrement())
+  nome          String         @unique
+  ativo         Boolean        @default(true)
+  gastos        Gasto[]
+  subcategorias Subcategoria[]
+}
+
+model Subcategoria {
+  id          Int       @id @default(autoincrement())
+  nome        String
+  categoriaId Int
+  categoria   Categoria @relation(fields: [categoriaId], references: [id])
+  ativo       Boolean   @default(true)
+  gastos      Gasto[]
+
+  @@unique([nome, categoriaId])
+}
+
+model Obra {
+  id     Int     @id @default(autoincrement())
+  codigo String  @unique
+  nome   String
+  ativo  Boolean @default(true)
+  gastos Gasto[]
+}
+
+enum Perfil {
+  ADMIN
+  OPERADOR
+}
+
+enum Fonte {
+  FOTO
+  AUDIO
+  TEXTO
+  WEB
+}
