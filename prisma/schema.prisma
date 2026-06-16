@@ -7,13 +7,15 @@ datasource db {
 }
 
 model Usuario {
-  id        Int      @id @default(autoincrement())
-  nome      String
-  telefone  String   @unique
-  perfil    Perfil   @default(OPERADOR)
-  ativo     Boolean  @default(true)
-  gastos    Gasto[]
-  criadoEm DateTime @default(now())
+  id             Int      @id @default(autoincrement())
+  nome           String
+  telefone       String   @unique
+  perfil         Perfil   @default(OPERADOR)
+  ativo          Boolean  @default(true)
+  pin            String?  // bcrypt hash — null até o primeiro login
+  primeiroAcesso Boolean  @default(true)
+  gastos         Gasto[]
+  criadoEm      DateTime @default(now())
 }
 
 model Gasto {
