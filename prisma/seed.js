@@ -41,7 +41,7 @@ const CATEGORIAS = [
 const USUARIOS_INICIAIS = [
   { nome: 'Rosane',      telefone: '5511944504411', perfil: 'ADMIN' },
   { nome: 'Erick',       telefone: '5511944508585', perfil: 'ADMIN' },
-  { nome: 'Funcionário', telefone: '5511973535055', perfil: 'OPERADOR' },
+  { nome: 'Cleber',      telefone: '5511983519913', perfil: 'OPERADOR' },
 ];
 
 async function seedCategorias() {

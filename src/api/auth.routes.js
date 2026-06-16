@@ -30,7 +30,7 @@ router.post('/login', async (req, res) => {
   }
 
   const usuario = await prisma.usuario.findFirst({
-    where: { telefone: tel, ativo: true, perfil: 'ADMIN' },
+    where: { telefone: tel, ativo: true },
   });
 
   if (!usuario) {
