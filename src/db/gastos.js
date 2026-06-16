@@ -34,9 +34,9 @@ async function listarGastos({ mes, ano, categoriaId, usuarioId, obraId, page = 1
     where.data = { gte: new Date(ano, 0, 1), lt: new Date(ano + 1, 0, 1) };
   }
 
-  if (categoriaId) where.categoriaId = categoriaId;
-  if (usuarioId) where.usuarioId = usuarioId;
-  if (obraId) where.obraId = obraId;
+  if (categoriaId) where.categoriaId = Number(categoriaId);
+  if (usuarioId) where.usuarioId = Number(usuarioId);
+  if (obraId) where.obraId = Number(obraId);
 
   const [total, items] = await Promise.all([
     prisma.gasto.count({ where }),
@@ -52,32 +52,46 @@ async function listarGastos({ mes, ano, categoriaId, usuarioId, obraId, page = 1
   return { total, page, limit, items };
 }
 
+/**
+ * Agrupa total gasto por mês nos últimos 12 meses (ou no ano informado).
+ * Sempre retorna os 12 meses do período, mesmo os sem lançamentos (total = 0).
+ */
 async function resumoMensal(ano) {
-  const anoAtual = ano || new Date().getFullYear();
-  const inicio = new Date(anoAtual, 0, 1);
-  const fim = new Date(anoAtual + 1, 0, 1);
+  const anoRef = ano || new Date().getFullYear();
+  const inicio = new Date(anoRef, 0, 1);
+  const fim = new Date(anoRef + 1, 0, 1);
 
   const gastos = await prisma.gasto.findMany({
     where: { data: { gte: inicio, lt: fim } },
-    select: { valor: true, data: true, categoriaId: true, categoria: { select: { nome: true } } },
+    select: { valor: true, data: true },
   });
 
-  // Agrupa por mês
+  // Inicializa todos os 12 meses com zero para garantir série completa no gráfico
   const porMes = {};
+  for (let m = 1; m <= 12; m++) {
+    porMes[m] = { mes: m, total: 0, quantidade: 0 };
+  }
+
   for (const g of gastos) {
     const mes = g.data.getMonth() + 1;
-    if (!porMes[mes]) porMes[mes] = { mes, total: 0, quantidade: 0 };
-    porMes[mes].total += parseFloat(g.valor);
+    porMes[mes].total = parseFloat((porMes[mes].total + parseFloat(g.valor)).toFixed(2));
     porMes[mes].quantidade += 1;
   }
 
-  return Object.values(porMes).sort((a, b) => a.mes - b.mes);
+  return Object.values(porMes);
 }
 
+/**
+ * Total por categoria em um determinado mês/ano.
+ * Se mes e ano não forem passados, considera todos os lançamentos.
+ */
 async function resumoPorCategoria({ mes, ano } = {}) {
   const where = {};
   if (mes && ano) {
-    where.data = { gte: new Date(ano, mes - 1, 1), lt: new Date(ano, mes, 1) };
+    where.data = {
+      gte: new Date(ano, mes - 1, 1),
+      lt: new Date(ano, mes, 1),
+    };
   }
 
   const gastos = await prisma.gasto.findMany({
@@ -89,7 +103,7 @@ async function resumoPorCategoria({ mes, ano } = {}) {
   for (const g of gastos) {
     const nome = g.categoria.nome;
     if (!porCat[nome]) porCat[nome] = 0;
-    porCat[nome] += parseFloat(g.valor);
+    porCat[nome] = parseFloat((porCat[nome] + parseFloat(g.valor)).toFixed(2));
   }
 
   return Object.entries(porCat)

@@ -1,39 +1,87 @@
-jest.mock('openai', () => {
-  return jest.fn().mockImplementation(() => ({
-    chat: { completions: { create: jest.fn() } },
-    audio: {
-      transcriptions: {
-        create: jest.fn().mockResolvedValue('gasolina vinte litros valor oitenta reais posto shell'),
-      },
-    },
-  }));
-});
+// Prefixo 'mock' permite que jest.mock acesse a variável mesmo com hoisting
+const mockTranscriptionCreate = jest.fn().mockResolvedValue(
+  'gastei oitenta reais no almoço no restaurante da esquina'
+);
 
-// Evita baixar arquivo real
+jest.mock('openai', () =>
+  jest.fn().mockImplementation(() => ({
+    audio: { transcriptions: { create: mockTranscriptionCreate } },
+  }))
+);
+
+jest.mock('axios');
 jest.mock('fs', () => ({
   ...jest.requireActual('fs'),
-  createReadStream: jest.fn(() => ({ pipe: jest.fn() })),
-  createWriteStream: jest.fn(() => ({
-    on: jest.fn((event, cb) => { if (event === 'finish') cb(); }),
-    close: jest.fn(),
-  })),
-  unlink: jest.fn(),
+  writeFileSync: jest.fn(),
+  createReadStream: jest.fn(() => ({})),
+  unlink: jest.fn((p, cb) => cb && cb()),
 }));
 
-describe('whisper.js', () => {
-  test('módulo exporta função transcreverAudio', () => {
-    const { transcreverAudio } = require('../src/ai/whisper');
-    expect(typeof transcreverAudio).toBe('function');
+const axios = require('axios');
+const fs = require('fs');
+const { transcreverAudio } = require('../src/ai/whisper');
+
+beforeEach(() => {
+  axios.get.mockReset();
+  fs.writeFileSync.mockReset();
+  fs.unlink.mockReset();
+  mockTranscriptionCreate.mockReset();
+
+  axios.get.mockResolvedValue({ data: Buffer.from('audio-fake-bytes') });
+  fs.unlink.mockImplementation((p, cb) => cb && cb());
+  mockTranscriptionCreate.mockResolvedValue('gastei oitenta reais no almoço no restaurante da esquina');
+});
+
+describe('whisper.js — transcreverAudio', () => {
+  test('chama axios.get com responseType arraybuffer', async () => {
+    await transcreverAudio('https://cdn.zapi.io/audio/test.ogg');
+
+    expect(axios.get).toHaveBeenCalledWith(
+      'https://cdn.zapi.io/audio/test.ogg',
+      expect.objectContaining({ responseType: 'arraybuffer' })
+    );
   });
 
-  test('transcrição retorna string não vazia', async () => {
-    const transcricaoMock = 'gasolina vinte litros valor oitenta reais posto shell';
-    expect(typeof transcricaoMock).toBe('string');
-    expect(transcricaoMock.length).toBeGreaterThan(0);
+  test('salva o buffer em arquivo temporário com sufixo .ogg', async () => {
+    await transcreverAudio('https://cdn.zapi.io/audio/test.ogg');
+
+    expect(fs.writeFileSync).toHaveBeenCalledWith(
+      expect.stringMatching(/audio_\d+\.ogg$/),
+      expect.any(Buffer)
+    );
   });
 
-  test('resultado da transcrição pode ser interpretado', () => {
-    const transcricao = 'almocei no restaurante do Zé, custou R$ 32,50';
-    expect(transcricao).toMatch(/R\$\s*\d+/);
+  test('retorna o texto transcrito como string não vazia', async () => {
+    const texto = await transcreverAudio('https://cdn.zapi.io/audio/test.ogg');
+
+    expect(typeof texto).toBe('string');
+    expect(texto.length).toBeGreaterThan(0);
+    expect(texto).toContain('oitenta reais');
+  });
+
+  test('deleta o arquivo temporário após a transcrição bem-sucedida', async () => {
+    await transcreverAudio('https://cdn.zapi.io/audio/test.ogg');
+
+    expect(fs.unlink).toHaveBeenCalledWith(
+      expect.stringMatching(/audio_\d+\.ogg$/),
+      expect.any(Function)
+    );
+  });
+
+  test('deleta o arquivo temporário mesmo quando a transcrição falha', async () => {
+    mockTranscriptionCreate.mockRejectedValueOnce(new Error('OpenAI indisponível'));
+
+    await expect(transcreverAudio('https://cdn.zapi.io/audio/test.ogg'))
+      .rejects.toThrow('OpenAI indisponível');
+
+    expect(fs.unlink).toHaveBeenCalled();
+  });
+
+  test('envia language pt ao Whisper', async () => {
+    await transcreverAudio('https://cdn.zapi.io/audio/test.ogg');
+
+    expect(mockTranscriptionCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ language: 'pt' })
+    );
   });
 });
