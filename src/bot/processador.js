@@ -7,8 +7,11 @@ const { enviarTexto, enviarConfirmacao, enviarSolicitacaoObra } = require('./sen
 const prisma = require('../db/prisma');
 
 // Estado de conversa em memória: telefone → { etapa, dados, categoriaObj, usuarioId }
-// etapa: 'AGUARDANDO_OBRA' | 'AGUARDANDO_CONFIRMACAO'
 const estadosConversa = new Map();
+
+// Lock de concorrência: impede processamento simultâneo do mesmo número
+// (ex: usuário envia duas fotos em sequência antes de responder)
+const emProcessamento = new Set();
 
 const ETAPA = {
   AGUARDANDO_OBRA: 'AGUARDANDO_OBRA',
@@ -17,17 +20,32 @@ const ETAPA = {
 
 /**
  * Ponto de entrada: processa uma mensagem recebida do WhatsApp.
+ * Garante que o mesmo número não seja processado em paralelo.
  */
 async function processarMensagem({ telefone, tipo, conteudo, usuario }) {
+  // Bloqueia processamento paralelo do mesmo número
+  if (emProcessamento.has(telefone)) {
+    console.warn(`[Processador] Mensagem de ${telefone} ignorada — processamento anterior ainda em andamento.`);
+    await enviarTexto(telefone, '⏳ Ainda estou processando sua mensagem anterior. Aguarde um momento.');
+    return;
+  }
+
+  emProcessamento.add(telefone);
+  try {
+    await _processarMensagemInterna({ telefone, tipo, conteudo, usuario });
+  } finally {
+    emProcessamento.delete(telefone);
+  }
+}
+
+async function _processarMensagemInterna({ telefone, tipo, conteudo, usuario }) {
   const estado = estadosConversa.get(telefone);
 
-  // Se há conversa em andamento, trata a resposta do usuário
   if (estado) {
     return tratarRespostaConversa(telefone, conteudo, estado, usuario);
   }
 
-  // Nova mensagem — processa conforme o tipo
-  let resultado; // { dados, categoriaObj }
+  let resultado;
 
   try {
     if (tipo === 'FOTO') {
@@ -41,8 +59,11 @@ async function processarMensagem({ telefone, tipo, conteudo, usuario }) {
       return;
     }
   } catch (err) {
-    console.error(`[${new Date().toISOString()}] [Processador] Erro ao processar mensagem de ${telefone}:`, err.message);
-    await enviarTexto(telefone, '❌ Ocorreu um erro ao processar sua mensagem. Tente novamente.');
+    console.error(`[Processador] Erro ao processar mensagem de ${telefone}:`, err.message);
+
+    // Mensagem específica por tipo de falha
+    const msgErro = classificarErroUsuario(err);
+    await enviarTexto(telefone, msgErro);
     return;
   }
 
@@ -59,7 +80,6 @@ async function processarMensagem({ telefone, tipo, conteudo, usuario }) {
     return;
   }
 
-  // Guarda objeto categoria junto com os dados para usar na confirmação
   estadosConversa.set(telefone, {
     etapa: ETAPA.AGUARDANDO_OBRA,
     dados,
@@ -75,10 +95,17 @@ async function tratarRespostaConversa(telefone, conteudo, estado, usuario) {
 
   if (estado.etapa === ETAPA.AGUARDANDO_OBRA) {
     const codigoObra = (conteudo.texto || '').trim();
-    const obraId = await resolverObra(codigoObra);
 
-    estado.dados.obra = codigoObra.toUpperCase() !== 'GERAL' ? codigoObra.toUpperCase() : null;
-    estado.dados.obraId = obraId;
+    try {
+      const obraId = await resolverObra(codigoObra);
+      estado.dados.obra = codigoObra.toUpperCase() !== 'GERAL' ? codigoObra.toUpperCase() : null;
+      estado.dados.obraId = obraId;
+    } catch (err) {
+      console.error(`[Processador] Erro ao resolver obra "${codigoObra}":`, err.message);
+      await enviarTexto(telefone, '❌ Erro ao buscar a obra. Tente novamente ou digite *GERAL*.');
+      return;
+    }
+
     estado.etapa = ETAPA.AGUARDANDO_CONFIRMACAO;
     estadosConversa.set(telefone, estado);
 
@@ -101,12 +128,17 @@ async function tratarRespostaConversa(telefone, conteudo, estado, usuario) {
 async function confirmarGasto(telefone, estado) {
   const { dados, categoriaObj, usuarioId } = estado;
 
-  // Usa o objeto categoria já resolvido pelo classificador; fallback para busca direta
   let categoria = categoriaObj;
   if (!categoria) {
-    categoria = await prisma.categoria.findFirst({
-      where: { nome: { contains: dados.categoria_sugerida || 'Material', mode: 'insensitive' }, ativo: true },
-    });
+    try {
+      categoria = await prisma.categoria.findFirst({
+        where: { nome: { contains: dados.categoria_sugerida || 'Material', mode: 'insensitive' }, ativo: true },
+      });
+    } catch (err) {
+      console.error(`[Processador] Erro ao buscar categoria no banco:`, err.message);
+      await enviarTexto(telefone, '❌ Erro ao acessar o banco de dados. Tente confirmar novamente em instantes.');
+      return;
+    }
   }
 
   if (!categoria) {
@@ -115,7 +147,13 @@ async function confirmarGasto(telefone, estado) {
     return;
   }
 
-  const subcategoria = await resolverSubcategoria(dados.subcategoria_sugerida, categoria.id);
+  let subcategoria;
+  try {
+    subcategoria = await resolverSubcategoria(dados.subcategoria_sugerida, categoria.id);
+  } catch (err) {
+    console.error(`[Processador] Erro ao resolver subcategoria:`, err.message);
+    subcategoria = null; // subcategoria é opcional; segue sem ela
+  }
 
   try {
     const gasto = await salvarGasto({
@@ -131,7 +169,7 @@ async function confirmarGasto(telefone, estado) {
       fonte: dados.fonte || 'TEXTO',
     });
 
-    console.log(`[${new Date().toISOString()}] [Processador] Gasto #${gasto.id} salvo — R$ ${gasto.valor} | cat: ${categoria.nome} | usuário: ${usuarioId}`);
+    console.log(`[Processador] Gasto #${gasto.id} salvo — R$ ${gasto.valor} | cat: ${categoria.nome} | usuário: ${usuarioId}`);
 
     estadosConversa.delete(telefone);
     await enviarTexto(
@@ -139,22 +177,26 @@ async function confirmarGasto(telefone, estado) {
       `✅ *Gasto registrado com sucesso!*\n\n🆔 ID: #${gasto.id}\n💰 R$ ${Number(gasto.valor).toFixed(2)}\n🏷️ ${categoria.nome}${subcategoria ? ` › ${subcategoria.nome}` : ''}`
     );
   } catch (err) {
-    console.error(`[${new Date().toISOString()}] [Processador] Erro ao salvar gasto:`, err.message);
-    await enviarTexto(telefone, '❌ Erro ao salvar o gasto. Tente novamente.');
+    console.error(`[Processador] Erro ao salvar gasto:`, err.message);
+
+    // Mantém o estado para o usuário poder tentar confirmar novamente
+    await enviarTexto(
+      telefone,
+      '❌ Erro ao salvar o gasto (banco de dados temporariamente indisponível).\n\nO gasto ainda está em memória. Responda *SIM* para tentar novamente ou *NÃO* para cancelar.'
+    );
   }
 }
 
 // --- Processadores por tipo ---
 
 async function processarFoto(imagemUrl, telefone) {
-  console.log(`[${new Date().toISOString()}] [Processador] FOTO de ${telefone}`);
+  console.log(`[Processador] FOTO de ${telefone}`);
   const dados = await extrairDadosNota(imagemUrl);
   if (dados.erro) return { dados, categoriaObj: null };
 
   dados.imagemUrl = imagemUrl;
   dados.fonte = 'FOTO';
 
-  // Resolve categoria via banco usando o nome sugerido pelo OCR
   let categoriaObj = null;
   if (dados.categoria_sugerida) {
     categoriaObj = await prisma.categoria.findFirst({
@@ -166,27 +208,18 @@ async function processarFoto(imagemUrl, telefone) {
 }
 
 async function processarAudio(audioUrl, telefone) {
-  console.log(`[${new Date().toISOString()}] [Processador] ÁUDIO de ${telefone}`);
-
-  // 1) Transcreve com Whisper
+  console.log(`[Processador] ÁUDIO de ${telefone}`);
   const transcricao = await transcreverAudio(audioUrl);
-
-  // 2) Classifica o texto transcrito e busca Categoria no banco
   const { dados, categoria: categoriaObj } = await classificarTexto(transcricao);
-
   dados.fonte = 'AUDIO';
-  // Preserva a transcrição original como descrição se o classificador não extraiu uma
   if (!dados.descricao) dados.descricao = transcricao.substring(0, 200);
-
   return { dados, categoriaObj };
 }
 
 async function processarTexto(texto, telefone) {
-  console.log(`[${new Date().toISOString()}] [Processador] TEXTO de ${telefone}`);
-
+  console.log(`[Processador] TEXTO de ${telefone}`);
   const { dados, categoria: categoriaObj } = await classificarTexto(texto);
   dados.fonte = 'TEXTO';
-
   return { dados, categoriaObj };
 }
 
@@ -201,7 +234,6 @@ async function resolverObra(codigo) {
   });
 
   if (!obra) {
-    // Cria automaticamente obras desconhecidas para não bloquear o fluxo
     const novaObra = await prisma.obra.create({
       data: { codigo: codigoNorm, nome: `Obra ${codigoNorm}` },
     });
@@ -209,6 +241,28 @@ async function resolverObra(codigo) {
   }
 
   return obra.id;
+}
+
+/**
+ * Converte um erro técnico numa mensagem amigável para o usuário do WhatsApp.
+ */
+function classificarErroUsuario(err) {
+  const msg = (err.message || '').toLowerCase();
+
+  if (msg.includes('timeout') || msg.includes('timedout')) {
+    return '⏱️ A IA demorou mais do que o esperado para responder. Tente novamente em alguns instantes.';
+  }
+  if (msg.includes('429') || msg.includes('rate limit')) {
+    return '⚠️ Muitas requisições simultâneas. Aguarde 30 segundos e tente novamente.';
+  }
+  if (msg.includes('legibilidade') || msg.includes('ilegível')) {
+    return '📸 Não consegui ler a imagem. Tente enviar com mais luz, foco ou descreva o gasto em texto.';
+  }
+  if (msg.includes('connect') || msg.includes('econnrefused')) {
+    return '🔌 Problema de conexão com o servidor. Tente novamente em instantes.';
+  }
+
+  return '❌ Ocorreu um erro ao processar sua mensagem. Tente novamente.';
 }
 
 module.exports = { processarMensagem, estadosConversa };

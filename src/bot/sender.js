@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { comRetry, erroAxiosTransitorio } = require('../utils/retry');
 
 function zapiHeaders() {
   return {
@@ -7,31 +8,45 @@ function zapiHeaders() {
   };
 }
 
-function zapiUrl(path) {
+function zapiUrl(caminho) {
   const base = process.env.ZAPI_BASE_URL || 'https://api.z-api.io/instances';
-  return `${base}/${process.env.ZAPI_INSTANCE_ID}/${path}`;
+  return `${base}/${process.env.ZAPI_INSTANCE_ID}/${caminho}`;
 }
 
 /**
- * Envia mensagem de texto simples.
+ * Envia mensagem de texto simples com retry (até 3 tentativas, timeout 15s).
+ * Erros são logados mas nunca propagados — o bot não deve travar por falha de envio.
  */
 async function enviarTexto(telefone, mensagem) {
   try {
-    await axios.post(
-      zapiUrl('token/send-text'),
-      { phone: telefone, message: mensagem },
-      { headers: zapiHeaders() }
+    await comRetry(
+      () =>
+        axios.post(
+          zapiUrl('token/send-text'),
+          { phone: telefone, message: mensagem },
+          { headers: zapiHeaders(), timeout: 15_000 }
+        ),
+      {
+        tentativas: 3,
+        delayMs: 2000,
+        deveRetentar: (err) => {
+          // Não retenta se Z-API retornou erro de autenticação ou número inválido
+          if (err.response?.status === 401 || err.response?.status === 400) return false;
+          return erroAxiosTransitorio(err);
+        },
+      }
     );
-    console.log(`[${new Date().toISOString()}] [Sender] Mensagem enviada para ${telefone}`);
+    console.log(`[Sender] Mensagem enviada para ${telefone}`);
   } catch (err) {
-    console.error(`[${new Date().toISOString()}] [Sender] Erro ao enviar para ${telefone}:`, err.message);
+    // Z-API indisponível: log e segue — melhor do que travar o processamento
+    console.error(`[Sender] Falha definitiva ao enviar para ${telefone} após retentativas:`, err.message);
   }
 }
 
 /**
  * Formata e envia o resumo de um gasto para confirmação do usuário.
  */
-async function enviarConfirmacao(telefone, dados, categorias) {
+async function enviarConfirmacao(telefone, dados) {
   const dataFormatada = dados.data
     ? new Date(dados.data + 'T12:00:00').toLocaleDateString('pt-BR')
     : 'não identificada';

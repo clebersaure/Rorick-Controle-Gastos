@@ -5,80 +5,122 @@ const {
   adicionarUsuario,
   atualizarUsuario,
   removerUsuarioPorId,
-  buscarUsuarioPorId,
 } = require('../db/usuarios');
 
 const router = express.Router();
 
-// Todas as rotas exigem autenticação de ADMIN
 router.use(autenticarAdmin);
 
-/** GET /api/usuarios — lista todos os usuários ativos */
+/** Valida que o telefone tem entre 10 e 15 dígitos numéricos. */
+function validarTelefone(tel) {
+  const normalizado = String(tel).replace(/\D/g, '');
+  return normalizado.length >= 10 && normalizado.length <= 15 ? normalizado : null;
+}
+
+/** Sanitiza mensagens de erro do Prisma para não vazar schema interno. */
+function sanitizarErroPrisma(err) {
+  if (err.code === 'P2002') return 'Telefone já cadastrado no sistema';
+  if (err.code === 'P2025') return 'Usuário não encontrado';
+  return 'Operação inválida';
+}
+
+/** GET /api/usuarios */
 router.get('/', async (req, res) => {
-  const usuarios = await listarUsuarios();
-  res.json(usuarios);
+  try {
+    const usuarios = await listarUsuarios();
+    res.json(usuarios);
+  } catch (err) {
+    console.error('[Usuarios] Erro ao listar:', err.message);
+    res.status(500).json({ erro: 'Erro ao buscar usuários.' });
+  }
 });
 
-/** POST /api/usuarios — cria novo usuário */
+/** POST /api/usuarios */
 router.post('/', async (req, res) => {
-  const { nome, telefone, perfil } = req.body;
-
-  if (!nome || !telefone) {
-    return res.status(400).json({ erro: 'nome e telefone são obrigatórios' });
-  }
-
-  const perfilValido = ['ADMIN', 'OPERADOR'];
-  if (perfil && !perfilValido.includes(perfil)) {
-    return res.status(400).json({ erro: `perfil deve ser um de: ${perfilValido.join(', ')}` });
-  }
-
   try {
-    const usuario = await adicionarUsuario({ nome, telefone, perfil });
+    const { nome, telefone, perfil } = req.body;
+
+    if (!nome?.trim() || !telefone) {
+      return res.status(400).json({ erro: 'nome e telefone são obrigatórios' });
+    }
+    if (String(nome).trim().length > 100) {
+      return res.status(400).json({ erro: 'nome muito longo (máx. 100 caracteres)' });
+    }
+
+    const telNormalizado = validarTelefone(telefone);
+    if (!telNormalizado) {
+      return res.status(400).json({ erro: 'Telefone inválido (use apenas dígitos, entre 10 e 15)' });
+    }
+
+    const perfilValido = ['ADMIN', 'OPERADOR'];
+    if (perfil && !perfilValido.includes(perfil)) {
+      return res.status(400).json({ erro: `perfil deve ser um de: ${perfilValido.join(', ')}` });
+    }
+
+    const usuario = await adicionarUsuario({ nome: nome.trim(), telefone: telNormalizado, perfil });
     res.status(201).json(usuario);
   } catch (err) {
-    res.status(400).json({ erro: err.message });
+    console.error('[Usuarios] Erro ao criar:', err.message);
+    if (err.code?.startsWith('P')) {
+      return res.status(400).json({ erro: sanitizarErroPrisma(err) });
+    }
+    res.status(500).json({ erro: 'Erro ao criar usuário.' });
   }
 });
 
-/** PATCH /api/usuarios/:id — atualiza nome, telefone ou perfil */
+/** PATCH /api/usuarios/:id */
 router.patch('/:id', async (req, res) => {
-  const { id } = req.params;
-  const { nome, telefone, perfil } = req.body;
-
-  const perfilValido = ['ADMIN', 'OPERADOR'];
-  if (perfil && !perfilValido.includes(perfil)) {
-    return res.status(400).json({ erro: `perfil deve ser um de: ${perfilValido.join(', ')}` });
-  }
-
-  // Impede que o admin remova o próprio perfil de ADMIN
-  if (String(req.usuario.id) === String(id) && perfil === 'OPERADOR') {
-    return res.status(400).json({ erro: 'Você não pode rebaixar seu próprio perfil' });
-  }
-
   try {
-    const usuario = await atualizarUsuario(id, { nome, telefone, perfil });
+    const { id } = req.params;
+    const { nome, telefone, perfil } = req.body;
+
+    const perfilValido = ['ADMIN', 'OPERADOR'];
+    if (perfil && !perfilValido.includes(perfil)) {
+      return res.status(400).json({ erro: `perfil deve ser um de: ${perfilValido.join(', ')}` });
+    }
+
+    if (String(req.usuario.id) === String(id) && perfil === 'OPERADOR') {
+      return res.status(400).json({ erro: 'Você não pode rebaixar seu próprio perfil' });
+    }
+
+    let telNormalizado;
+    if (telefone !== undefined) {
+      telNormalizado = validarTelefone(telefone);
+      if (!telNormalizado) {
+        return res.status(400).json({ erro: 'Telefone inválido (use apenas dígitos, entre 10 e 15)' });
+      }
+    }
+
+    const campos = {};
+    if (nome?.trim()) campos.nome = nome.trim().substring(0, 100);
+    if (telNormalizado) campos.telefone = telNormalizado;
+    if (perfil) campos.perfil = perfil;
+
+    const usuario = await atualizarUsuario(id, campos);
     res.json(usuario);
   } catch (err) {
+    console.error('[Usuarios] Erro ao atualizar:', err.message);
     if (err.code === 'P2025') return res.status(404).json({ erro: 'Usuário não encontrado' });
-    res.status(400).json({ erro: err.message });
+    if (err.code?.startsWith('P')) return res.status(400).json({ erro: sanitizarErroPrisma(err) });
+    res.status(500).json({ erro: 'Erro ao atualizar usuário.' });
   }
 });
 
-/** DELETE /api/usuarios/:id — soft delete (ativo = false) */
+/** DELETE /api/usuarios/:id */
 router.delete('/:id', async (req, res) => {
-  const { id } = req.params;
-
-  // Admin não pode se auto-deletar
-  if (String(req.usuario.id) === String(id)) {
-    return res.status(400).json({ erro: 'Você não pode desativar sua própria conta' });
-  }
-
   try {
+    const { id } = req.params;
+
+    if (String(req.usuario.id) === String(id)) {
+      return res.status(400).json({ erro: 'Você não pode desativar sua própria conta' });
+    }
+
     await removerUsuarioPorId(id);
     res.json({ ok: true });
   } catch (err) {
+    console.error('[Usuarios] Erro ao remover:', err.message);
     if (err.code === 'P2025') return res.status(404).json({ erro: 'Usuário não encontrado' });
-    res.status(400).json({ erro: err.message });
+    res.status(500).json({ erro: 'Erro ao desativar usuário.' });
   }
 });
 

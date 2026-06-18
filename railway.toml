@@ -1,0 +1,21 @@
+# railway.toml — configuração de deploy no Railway (serviço único: API + Frontend)
+# Documentação: https://docs.railway.com/reference/config-as-code
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "node src/server.js"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+# Variáveis de ambiente configuradas pelo Railway automaticamente:
+# PORT       — injetada pelo Railway
+# DATABASE_URL — injetada pelo plugin PostgreSQL
+#
+# Configure as demais em Railway → serviço → Variables:
+# JWT_SECRET, OPENAI_API_KEY, ZAPI_TOKEN, ZAPI_INSTANCE_ID, WEBHOOK_SECRET
+# NODE_ENV=production

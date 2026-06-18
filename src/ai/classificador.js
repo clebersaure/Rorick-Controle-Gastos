@@ -1,13 +1,15 @@
 require('dotenv').config();
 const OpenAI = require('openai');
 const prisma = require('../db/prisma');
+const { comRetry, erroOpenAITransitorio } = require('../utils/retry');
+const { parseJsonModelo } = require('../utils/jsonSafe');
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  timeout: 30_000,
+  maxRetries: 0,
+});
 
-/**
- * Monta o prompt de sistema dinamicamente com as categorias e subcategorias
- * ativas no banco — assim o modelo sempre trabalha com dados atualizados.
- */
 async function montarPromptSistema() {
   const categorias = await prisma.categoria.findMany({
     where: { ativo: true },
@@ -58,57 +60,65 @@ Regras de classificação:
  * e retorna os dados estruturados junto com o objeto Categoria do banco.
  *
  * @param {string} texto - mensagem do usuário ou transcrição Whisper
- * @returns {{ dados: object, categoria: object|null }} dados extraídos e objeto Categoria
+ * @returns {{ dados: object, categoria: object|null }}
  */
 async function classificarTexto(texto) {
-  console.log(`[${new Date().toISOString()}] [Classificador] Classificando: "${texto.substring(0, 80)}"`);
+  console.log(`[Classificador] Classificando: "${texto.substring(0, 80)}"`);
 
-  const promptSistema = await montarPromptSistema();
-
-  const response = await client.chat.completions.create({
-    model: process.env.OPENAI_MODEL_TEXT || 'gpt-4o-mini',
-    max_tokens: 300,
-    temperature: 0,
-    messages: [
-      { role: 'system', content: promptSistema },
-      { role: 'user', content: texto },
-    ],
+  // Carrega categorias do banco (com retry para indisponibilidade temporária)
+  const promptSistema = await comRetry(() => montarPromptSistema(), {
+    tentativas: 3,
+    delayMs: 1000,
+    deveRetentar: (err) => err.message?.includes('connect') || err.message?.includes('timeout'),
   });
 
-  const resposta = response.choices[0].message.content.trim();
-  console.log(`[${new Date().toISOString()}] [Classificador] Resultado bruto: ${resposta}`);
+  const resposta = await comRetry(
+    async () => {
+      const response = await client.chat.completions.create({
+        model: process.env.OPENAI_MODEL_TEXT || 'gpt-4o-mini',
+        max_tokens: 300,
+        temperature: 0,
+        messages: [
+          { role: 'system', content: promptSistema },
+          { role: 'user', content: texto },
+        ],
+      });
+      return response.choices[0].message.content.trim();
+    },
+    { tentativas: 3, delayMs: 2000, deveRetentar: erroOpenAITransitorio }
+  );
 
-  const dados = JSON.parse(resposta);
+  console.log(`[Classificador] Resultado bruto: ${resposta}`);
 
-  // Normaliza data ausente para hoje
+  // JSON malformado → retorna dados neutros para não bloquear o fluxo
+  let dados;
+  try {
+    dados = parseJsonModelo(resposta, 'Classificador');
+  } catch (err) {
+    console.warn(`[Classificador] JSON inválido — usando dados neutros: ${err.message}`);
+    dados = { valor: null, data: null, fornecedor: null, descricao: texto.substring(0, 200), categoria_sugerida: null, subcategoria_sugerida: null };
+  }
+
   if (!dados.data) {
     dados.data = new Date().toISOString().split('T')[0];
   }
 
-  // Busca o objeto Categoria no banco pelo nome sugerido (match exato insensível)
   let categoria = null;
   if (dados.categoria_sugerida) {
     categoria = await prisma.categoria.findFirst({
-      where: {
-        nome: { equals: dados.categoria_sugerida, mode: 'insensitive' },
-        ativo: true,
-      },
+      where: { nome: { equals: dados.categoria_sugerida, mode: 'insensitive' }, ativo: true },
       include: { subcategorias: { where: { ativo: true } } },
     });
 
-    // Fallback: busca por contém se exato não encontrou
     if (!categoria) {
       categoria = await prisma.categoria.findFirst({
-        where: {
-          nome: { contains: dados.categoria_sugerida, mode: 'insensitive' },
-          ativo: true,
-        },
+        where: { nome: { contains: dados.categoria_sugerida, mode: 'insensitive' }, ativo: true },
         include: { subcategorias: { where: { ativo: true } } },
       });
     }
   }
 
-  console.log(`[${new Date().toISOString()}] [Classificador] Categoria resolvida: ${categoria?.nome ?? 'não identificada'}`);
+  console.log(`[Classificador] Categoria resolvida: ${categoria?.nome ?? 'não identificada'}`);
 
   return { dados, categoria };
 }
