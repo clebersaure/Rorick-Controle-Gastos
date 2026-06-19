@@ -63,7 +63,7 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 if (fs.existsSync(PUBLIC_DIR)) {
   app.use(express.static(PUBLIC_DIR));
   // SPA fallback: qualquer rota não-API retorna o index.html
-  app.get('*', (req, res) => {
+  app.get('{*path}', (req, res) => {
     res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
   });
 } else {
