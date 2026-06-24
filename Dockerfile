@@ -49,8 +49,9 @@ COPY package.json ./
 COPY src/ ./src/
 COPY prisma/ ./prisma/
 
-# Gera o Prisma Client (necessário para o adapter pg)
-RUN npx prisma generate
+# Gera o Prisma Client — DATABASE_URL fictícia só para satisfazer o schema durante o build
+# (prisma generate não conecta ao banco, apenas lê o schema)
+RUN DATABASE_URL="postgresql://build:build@build:5432/build" npx prisma generate
 
 # Copia o build estático do frontend para ser servido pelo Express (opcional)
 # Se frontend estiver em serviço separado no Railway, remova estas duas linhas
