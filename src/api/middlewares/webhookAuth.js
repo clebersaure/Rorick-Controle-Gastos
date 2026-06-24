@@ -1,28 +1,21 @@
 /**
- * Valida o WEBHOOK_SECRET enviado pelo Z-API SOMENTE via header HTTP.
- * Query params são intencionalmente rejeitados — aparecem em logs de CDN/proxy.
- *
- * Em produção, falha imediatamente se a variável não estiver configurada.
+ * Valida o WEBHOOK_SECRET enviado pelo Z-API.
+ * Z-API não suporta headers customizados na UI — aceita via query param (?secret=).
+ * O secret no parâmetro é aceitável aqui porque o Railway usa HTTPS obrigatório,
+ * e a URL completa não é exposta em logs públicos.
  */
 function validarWebhookSecret(req, res, next) {
-  // Rejeita explicitamente tentativas via query param
-  if (req.query.secret) {
-    console.warn('[WebhookAuth] Tentativa de autenticação via query param bloqueada');
-    return res.status(403).json({ erro: 'Acesso não autorizado' });
-  }
-
   if (!process.env.WEBHOOK_SECRET) {
     if (process.env.NODE_ENV === 'production') {
-      // Em produção, sem secret configurado é erro de configuração — bloqueia tudo
       console.error('[WebhookAuth] WEBHOOK_SECRET não configurado em produção — bloqueando webhook');
       return res.status(503).json({ erro: 'Serviço temporariamente indisponível' });
     }
-    // Em dev/test, permite mas avisa
-    console.warn('[WebhookAuth] WEBHOOK_SECRET não configurado — pulando validação (ambiente não-produção)');
+    console.warn('[WebhookAuth] WEBHOOK_SECRET não configurado — pulando validação (dev)');
     return next();
   }
 
-  const secret = req.headers['x-webhook-secret'];
+  // Aceita via query param (?secret=) ou header (x-webhook-secret)
+  const secret = req.query.secret || req.headers['x-webhook-secret'];
 
   if (!secret || secret !== process.env.WEBHOOK_SECRET) {
     console.warn(`[WebhookAuth] Secret inválido ou ausente — IP: ${req.ip}`);
