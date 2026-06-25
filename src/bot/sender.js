@@ -8,9 +8,9 @@ function zapiHeaders() {
   };
 }
 
-function zapiUrl(caminho) {
+function zapiUrl(endpoint) {
   const base = process.env.ZAPI_BASE_URL || 'https://api.z-api.io/instances';
-  return `${base}/${process.env.ZAPI_INSTANCE_ID}/${caminho}`;
+  return `${base}/${process.env.ZAPI_INSTANCE_ID}/token/${process.env.ZAPI_TOKEN}/${endpoint}`;
 }
 
 /**
@@ -22,7 +22,7 @@ async function enviarTexto(telefone, mensagem) {
     await comRetry(
       () =>
         axios.post(
-          zapiUrl('token/send-text'),
+          zapiUrl('send-text'),
           { phone: telefone, message: mensagem },
           { headers: zapiHeaders(), timeout: 15_000 }
         ),
