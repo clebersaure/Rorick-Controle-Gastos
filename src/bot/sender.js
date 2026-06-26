@@ -3,7 +3,7 @@ const { comRetry, erroAxiosTransitorio } = require('../utils/retry');
 
 function zapiHeaders() {
   return {
-    'Client-Token': process.env.ZAPI_TOKEN,
+    'Client-Token': process.env.ZAPI_CLIENT_TOKEN || process.env.ZAPI_TOKEN,
     'Content-Type': 'application/json',
   };
 }
